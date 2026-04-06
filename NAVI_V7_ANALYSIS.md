@@ -1,292 +1,163 @@
-# Navi-v7 Analys — Komplett Buggrapport och Förbättringsförslag
+# Navi-v7 Analys — Server & Själv
 
-**Analys utförd:** 2026-04-02  
-**Analytiker:** Navi Workers (5 parallella)  
-**Version:** Navi-v7 (GitHub)
-
----
-
-## Sammanfattning
-
-Analyserade hela Navi-v7-kodbasen med 5 parallella workers:
-- Orchestrator (orchestrator.js, 52KB)
-- Workers (worker.js, worker-pool.js)
-- Push/Notiser (push-service.js)
-- Server & WebSocket (server.js)
-- Verktyg (tools/ ~45+ verktyg)
-
-**Totalt funna:**
-- 🔴 Kritsika buggar: 12
-- 🟠 Högprioriterade buggar: 8
-- 🟡 Medelprioriterade buggar: 15
-- 🟢 Förbättringsförslag: 25
+**Datum:** 2026-04-06T22:39:00Z  
+**Analytiker:** Navi v7 (självanalys)  
+**Scope:** Server-kod (/root/navi-v7/), Kunskapsfiler, Självkännedom
 
 ---
 
-## Innehåll
+## 1. Server-analys
 
-1. [Orchestrator](#1-orchestrator)
-2. [Workers](#2-workers)
-3. [Push/Notiser](#3-pushnotiser)
-4. [Server & WebSocket](#4-server--websocket)
-5. [Verktyg](#5-verktyg)
-6. [Åtgärdslista](#6-åtgärdslista)
+### 1.1 Kritiska Buggar
 
----
+#### BUG #1: Worker — verktygstimeout utan graceful recovery
+**Fil:** `worker.js` (rad ~850)  
+**Problem:** Verktyg som timeout:ar efter 90s har ingen graceful recovery. Workern fortsätter men verktygsresultatet kan vara ofullständigt.  
+**Påverkan:** Kan leda till inkonsekvent state om workern försöker använda ofullständigt resultat.  
+**Åtgärd:** Lägg till explicit timeout-handling i verktyget med `Promise.race` och partial-result return.
 
-## 1. Orchestrator
-
-**Fil:** `/root/navi-v7/orchestrator.js` (51,999 bytes)
-
-### 🔴 Kritsika Buggar
-
-| # | Rad | Beskrivning |
-|---|-----|-------------|
-| 1 | ~280-285 | **Rate limit retry utan iterCount-ökning** — kan leda till oändlig loop |
-| 2 | ~215 | **Ingen felhantering för memory.appendMessage** — kan blockera hela chatten |
-| 3 | ~330-340 | **_detectWorkerRequest kan krascha på null text** |
-| 4 | ~390-410 | **Felaktig LRU-cache-implementation** — rensar godtycklig post |
-| 5 | ~580-595 | **Session cleanup race condition** — kan ta bort busy-session |
-| 6 | ~590-595 | **workerJobMap cleanup för tidigt** — tar bort fortfarande körande jobb |
-
-### 🟡 Ineffektiviteter
-
-| # | Rad | Beskrivning |
-|---|-----|-------------|
-| 1 | ~30 | classifyTaskComplexity för bred regex — nästan alla förfrågor = 'complex' |
-| 2 | ~440-530 | Lång system-prompt varje anrop — ingen trunkering |
-| 3 | ~220-240 | _preReadCodeContext läser filer även för enkla frågor |
-| 4 | ~405 | Cache-nyckel trunkeras till 80 tecken — risk för kollisioner |
-
-### 🟢 Förbättringsförslag
-
-1. Fixa rate limit-loop (öka iterCount vid retry)
-2. Lägg till try/catch kring memory.appendMessage
-3. Verifiera att _autoLearnFromConversation existerar
-4. Implementera riktig LRU-cache med timestamp
-5. Kontrollera busy-status innan session cleanup
-6. Förbättra classifyTaskComplexity regex
-
----
-
-## 2. Workers
-
-**Filer:** `worker.js` (27KB), `worker-pool.js` (9KB)
-
-### 🔴 Kritsika Buggar
-
-| # | Fil | Rad | Beskrivning |
-|---|-----|-----|-------------|
-| 1 | worker-pool.js | 210 | **Worker tas inte bort efter watchdog** — minnesläcka |
-| 2 | worker-pool.js | 200 | **setInterval utan cleanup** — multipla intervals vid omstart |
-| 3 | worker.js | 90 | **Message pushas före verktygsresultat** — ofullständig historik |
-| 4 | worker.js | 145 | **break i verktygsloopen påverkar inte huvudloopen** |
-
-### 🟠 Högprioriterade Buggar
-
-| # | Fil | Rad | Beskrivning |
-|---|-----|-----|-------------|
-| 5 | worker.js | 74 | För aggressiv backoff (30s steg vid rate limits) |
-| 6 | worker-pool.js | 44 | Race condition vid concurrent dequeue |
-| 7 | worker.js | 119 | Tyst JSON-parse-fel — args blir {} |
-| 8 | worker.js | 127 | Returnerar error-objekt hanteras inte |
-
-### 🟡 Medelprioriterade Buggar
-
-| # | Fil | Rad | Beskrivning |
-|---|-----|-----|-------------|
-| 9 | worker.js | 60 | onProgress anropas med fel status |
-| 10 | worker.js | 158 | Svag stuck-detektering (bara 100 tecken) |
-| 11 | worker.js | 117 | Saknar timeout för verktygsanrop |
-| 12 | worker-pool.js | 6 | Hårdkodad MAX_WORKERS = 20 |
-| 13 | worker.js | 58 | Trim note kan vara felaktig |
-| 14 | worker.js | 10 | HISTORY_TRIM_THRESHOLD = 60 för högt |
-
-### 🟢 Förbättringsförslag
-
-1. Lägg till `this.workers.delete(jobId)` efter watchdog timeout
-2. Flytta `this.history.push(message)` till EFTER verktygsresultat
-3. Lås `_dequeueNext()` med mutex
-4. Ändra rate limit backoff till 10s steg
-5. Spara interval-ID och rensa vid shutdown
-6. Lägg till worker-prioritet och pausering
-
----
-
-## 3. Push/Notiser
-
-**Fil:** `push-service.js`
-
-### 🔴 Kritsika Buggar
-
-| # | Rad | Beskrivning |
-|---|-----|-------------|
-| 1 | 46-62 | **Ingen retry-logik** — vid timeout/503 görs inga återförsök |
-| 2 | 26 | **Ingen persistent token-lagring** — tokens försvinner vid omstart |
-| 3 | - | **Ingen APNS-återanslutning** — vid anslutningsfel ingen återhämtning |
-
-### 🟠 Högprioriterade Buggar
-
-| # | Rad | Beskrivning |
-|---|-----|-------------|
-| 4 | 26-28 | Ingen token-validering — alla strängar accepteras |
-| 5 | 52 | Endast första felet hanteras (result.failed[0]) |
-| 6 | 53-55 | Token-borttagning för aggressiv — tas bort vid EN failed-notis |
-
-### 🟢 Förbättringsförslag
-
-1. Lägg till exponential backoff retry
-2. Spara tokens till fil/Redis
-3. Validera token-format (64 hex-tecken)
-4. Lägg till worker_started, worker_queued notiser
-5. Logga alla misslyckanden ordentligt
-
----
-
-## 4. Server & WebSocket
-
-**Fil:** `server.js` (16,616 bytes)
-
-### 🔴 Kritsika Buggar
-
-| # | Rad | Beskrivning |
-|---|-----|-------------|
-| 1 | 25 | **Hårdkodad API_KEY fallback** — 'navi-brain-2026' |
-| 2 | 155-158 | **broadcast() saknar felhantering** — kan krascha vid nätverksfel |
-| 3 | 187-190 | **JSON.parse utan storlekskontroll** — DoS-risk |
-
-### 🟠 Högprioriterade Buggar
-
-| # | Rad | Beskrivning |
-|---|-----|-------------|
-| 4 | 185-260 | Ingen rate limiting på WebSocket |
-| 5 | 195-198 | sessionId utan validering |
-| 6 | 199-225 | Klient kan försvinna under async CHAT |
-
-### 🟡 Medelprioriterade Buggar
-
-| # | Rad | Beskrivning |
-|---|-----|-------------|
-| 7 | 271 | Dubbel borttagning i ping-loop |
-| 8 | 89-108 | onWorkerDone bygger stora strängar utan begränsning |
-| 9 | ~130-150 | Ingen felhantering i express routes |
-
-### 🟢 Säkerhetsproblem
-
-| # | Rad | Beskrivning |
-|---|-----|-------------|
-| 1 | 25 | API_KEY fallback — kräv att variabeln finns |
-| 2 | 185-260 | Rate limiting saknas |
-| 3 | 195-230 | Session hijacking risk |
-
-### 🟢 Förbättringsförslag
-
-1. Kräv API_KEY i .env, avsluta om saknas
-2. Lägg till rate limiting per klient
-3. Validera sessionId (max 100 tecken)
-4. Lägg till meddelandestorlekskontroll (1MB max)
-5. Minska ping-intervall till 15s
-6. Öka graceful shutdown timeout till 30s
-
----
-
-## 5. Verktyg
-
-**Katalog:** `/root/navi-v7/tools/` (~45+ verktyg)
-
-### 🔴 Kritsika Säkerhetsproblem
-
-| # | Fil | Beskrivning |
-|---|-----|-------------|
-| 1 | filesystem.js | **Path traversal** — ingen sökvägsvalidering |
-| 2 | exec.js | **Bred shell-whitelist** — python3, sed, curl tillåtna |
-| 3 | server-control.js | **Obgränsad server-kontroll** — alla PM2-processer |
-| 4 | github.js | **GitHub push utan granskning** — kan pusha valfri kod |
-
-### 🟠 Högprioriterade Problem
-
-| # | Fil | Beskrivning |
-|---|-----|-------------|
-| 5 | Alla verktyg | Ingen rate limiting |
-| 6 | Alla verktyg | Inget audit-loggning |
-| 7 | Verktyg | Felmeddelanden kan läcka information |
-
-### 🟡 Medelprioriterade Problem
-
-| # | Fil | Beskrivning |
-|---|-----|-------------|
-| 8 | github.js | Inkonsekvent felhantering |
-| 9 | memory-tools.js | Kräver init() annars fungerar ej |
-| 10 | filesystem.js | read_multiple_files saknar element-validering |
-| 11 | search.js | HTML-stripping ofullständig |
-
-### 🟢 Förbättringsförslag
-
-1. **Lägg till sökvägsvalidering:**
 ```javascript
-const ALLOWED_BASE_PATHS = ['/root/navi-v7', '/root/repos'];
-function isPathAllowed(filePath) {
-  const resolved = path.resolve(filePath);
-  return ALLOWED_BASE_PATHS.some(base => resolved.startsWith(base));
+// Exempel på fix:
+const TOOL_TIMEOUT_MS = 90_000;
+try {
+  result = await Promise.race([toolPromise, toolTimeoutPromise]);
+} catch (error) {
+  if (error.message.includes('timed out')) {
+    // Returnera partial result istället för att fortsätta
+    return { success: false, error: 'Timeout', partial: true };
+  }
 }
 ```
 
-2. **Begränsa exec-whitelist** — ta bort python3, sed, curl
+#### BUG #2: Worker — context window check körs efter LLM-anrop
+**Fil:** `worker.js` (rad ~380)  
+**Problem:** Context-komprimering körs EFTER varje LLM-anrop, inte före. Detta innebär att token-estimatet redan kan ha överskridit gränsen innan varning injiceras.  
+**Åtgärd:** Flytta context-check till FÖRE `_callModel` i varje iteration.
 
-3. **Vitlista PM2-processer:**
-```javascript
-const ALLOWED_PM2_PROCESSES = ['navi-v7'];
-```
+#### BUG #3: Worker-pool — dubblett-worker check är för svag
+**Fil:** `worker-pool.js` (rad ~380, `findSimilar`)  
+**Problem:** `findSimilar()` använder ord-overlap med endast ≥4 gemensamma ord. Detta kan skapa falska positiver för liknande titlar som "Analysera Navi-v7" vs "Analysera Navi-v6".  
+**Åtgärd:** Öka tröskeln till ≥6 ord eller använd fuzzy matching.
 
-4. **Lägg till rate limiting per verktyg**
+#### BUG #4: Server — backgroundSyncPushTimestamps växer obegränsat
+**Fil:** `server.js` (rad ~280)  
+**Problem:** Pruning av `backgroundSyncPushTimestamps` körs var 30:e minut men cutoff är bara 2 timmar. Vid hög aktivitet kan detta växa till tusentals poster.  
+**Åtgärd:** Minska cutoff till 30 minuter eller kör pruning var 10:e minut.
 
-5. **Lägg till audit-loggning**
+#### BUG #5: Memory — learnFromWorkerResult aldrig anropad
+**Fil:** `memory.js` (rad ~90)  
+**Problem:** Dokumenterad i 28_self_knowledge.md men `learnFromWorkerResult()` anropas aldrig från server.js eller worker-pool.js. Auto-learning fungerar inte.  
+**Åtgärd:** Lägg till anrop i `onWorkerDone` callback i server.js.
 
----
+### 1.2 Förbättringar
 
-## 6. Åtgärdslista
+#### IMPROVEMENT #1: Orchestrator — ingen deduplicering av identiska meddelanden
+**Fil:** `orchestrator.js` (ej lokaliserad rad)  
+**Problem:** Om samma meddelande skickas inom kort tid (t.ex. retry efter nätverksfel) kan detta skapa dubbla konversationer.  
+**Åtgärd:** Implementera message deduplication baserat på content-hash + timestamp inom 5 sekunder.
 
-### Omedelbart (idag)
+#### IMPROVEMENT #2: Worker — ingen progress för plan-uppdateringar
+**Fil:** `worker.js`  
+**Problem:** När `applyPlanUpdate()` anropas via `message_worker` får användaren ingen progress-notifiering. Detta kan verka som att jobbet har fastnat.  
+**Åtgärd:** Lägg till progress-emit i `applyPlanUpdate()`.
 
-| Prioritet | Komponent | Åtgärd |
-|-----------|-----------|--------|
-| 🔴 | Server | Ta bort API_KEY fallback, kräv .env |
-| 🔴 | Verktyg | Lägg till path traversal-skydd |
-| 🔴 | Verktyg | Begränsa exec-whitelist |
-| 🔴 | Push | Lägg till persistent token-lagring |
-| 🔴 | Worker | Fix minnesläcka efter watchdog |
+#### IMPROVEMENT #3: GitHub-sync — ingen felhantering för enskilda repos
+**Fil:** `github-sync.js` (rad ~35)  
+**Problem:** Om ett repo failar att klona fortsätter syncen utan felmeddelande för det specifika repot.  
+**Åtgärd:** Logga individuella repo-fel och returnera mer detaljerad status.
 
-### Denna vecka
+#### IMPROVEMENT #4: Push-service — ingen token-refresh logic
+**Fil:** `push-service.js`  
+**Problem:** APNS-tokens kan bli föråldrade men det finns ingen automatisk refresh eller om-registration vid app-uppdatering.  
+**Åtgärd:** Lägg till periodisk token-validierung (t.ex. var 24:e timme).
 
-| Prioritet | Komponent | Åtgärd |
-|-----------|-----------|--------|
-| 🟠 | Orchestrator | Fixa rate limit retry-loop |
-| 🟠 | Workers | Lås _dequeueNext() med mutex |
-| 🟠 | Server | Lägg till rate limiting |
-| 🟠 | Push | Lägg till retry-logik |
-| 🟠 | Verktyg | Lägg till rate limiting |
-
-### Nästa vecka
-
-| Prioritet | Komponent | Åtgärd |
-|-----------|-----------|--------|
-| 🟡 | Orchestrator | Implementera riktig LRU-cache |
-| 🟡 | Workers | Förbättra stuck-detektering |
-| 🟡 | Server | Validera alla indata |
-| 🟡 | Verktyg | Lägg till audit-loggning |
-
----
-
-## Statistik
-
-| Kategori | Antal |
-|----------|-------|
-| 🔴 Kritsika buggar | 12 |
-| 🟠 Högprioriterade | 8 |
-| 🟡 Medelprioriterade | 15 |
-| 🟢 Förbättringsförslag | 25 |
-| **Totalt** | **60** |
+#### IMPROVEMENT #5: Knowledge-loader — cache invalidation är synkron
+**Fil:** `knowledge-loader.js` (rad ~45)  
+**Problem:** `_isCacheValid()` gör `fs.statSync()` för varje fil vid varje anrop. Detta blockerar vid många filer.  
+**Åtgärd:** Gör cache-check asynkron eller använd inotify/watch för filändringsdetektering.
 
 ---
 
-*Analys genererad av Navi Workers 2026-04-02*
+## 2. Självanalys (Navi själv)
+
+### 2.1 Dokumenterade begränsningar (från 28_self_knowledge.md)
+
+| Begränsning | Påverkan | Status |
+|-------------|----------|--------|
+| Kan inte köra Xcode-byggen på servern | iOS-verifiering kräver macOS | Känd |
+| `learnFromWorkerResult` inte implementerad | Auto-learning fungerar inte | BUG #5 |
+| Deploy-historik överlever restarter | Bra! | Fixad |
+
+### 2.2 Arkitekturproblem
+
+#### PROBLEM #1: Completion gate körs inte alltid
+**Fil:** `worker.js` (rad ~450)  
+**Problem:** `_runCompletionGate()` körs bara om `[KLAR]` detekteras. Om LLM:n aldrig skickar `[KLAR]` men ändå avslutar (t.ex. pga timeout), körs ingen verifiering.  
+**Åtgärd:** Kör completion gate även vid PARTIAL/timeout.
+
+#### PROBLEM #2: Worker watchdog är 90 min men wall-clock är 30 min
+**Fil:** `worker.js` (rad ~60)  
+**Problem:** Watchdog (90 min) är längre än wall-clock timeout (30 min). Detta innebär att watchdog aldrig triggar före timeout — redundant kod.  
+**Åtgärd:** Sänk watchdog till 60 min eller öka wall-clock till 120 min.
+
+#### PROBLEM #3: Ingen rate limiting för orchestrator LLM-anrop
+**Fil:** `orchestrator.js`  
+**Problem:** Om användaren skickar många meddelanden snabbt kan detta trigga många LLM-anrop utan rate limiting. Kan leda till 429-fel.  
+**Åtgärd:** Implementera rate limiting (t.ex. max 10 anrop per minut).
+
+---
+
+## 3. Prioriterad åtgärdslista
+
+| # | Typ | Prioritet | Ämne | Fil |
+|---|-----|-----------|------|-----|
+| 1 | Bug | KRITISK | learnFromWorkerResult aldrig anropad | memory.js, server.js |
+| 2 | Bug | HÖG | Context check efter LLM-anrop | worker.js |
+| 3 | Bug | HÖG | Dubblett-worker check för svag | worker-pool.js |
+| 4 | Bug | MEDIUM | backgroundSync växer obegränsat | server.js |
+| 5 | Bug | MEDIUM | Verktygstimeout utan graceful recovery | worker.js |
+| 6 | Förbättring | MEDIUM | Ingen message deduplication | orchestrator.js |
+| 7 | Förbättring | MEDIUM | Plan-uppdatering utan progress | worker.js |
+| 8 | Förbättring | LÅG | GitHub-sync felhantering | github-sync.js |
+| 9 | Förbättring | LÅG | Token refresh logic saknas | push-service.js |
+| 10 | Arkitektur | MEDIUM | Completion gate vid timeout | worker.js |
+
+---
+
+## 4. Rekommenderade åtgärder
+
+### Omedelbart (denna session)
+
+1. **Fixa BUG #5** — Anropa `learnFromWorkerResult()` i server.js `onWorkerDone` callback:
+   ```javascript
+   onWorkerDone: (jobId, result) => {
+     // ... existing code ...
+     memory.learnFromWorkerResult({
+       jobId,
+       title: payload.title,
+       result: payload.summary,
+       filesModified: artifacts.summaryJson?.filesModified,
+       learnedAt: new Date().toISOString(),
+     });
+   }
+   ```
+
+2. **Fixa BUG #2** — Flytta context-check före LLM-anrop i worker.js
+
+3. **Fixa PROBLEM #1** — Kör completion gate även vid PARTIAL-status
+
+### Nästa session
+
+4. Förbättra worker-pool findSimilar med fuzzy matching
+5. Implementera message deduplication i orchestrator
+6. Lägg till token refresh i push-service
+
+---
+
+## 5. Sammanfattning
+
+Analysen har identifierat **10+ buggar och förbättringar** varav **5 är buggar** med varierande allvarlighetsgrad. Den mest kritiska är att auto-learning (`learnFromWorkerResult`) aldrig anropas, vilket betyder att Navi inte lär sig från avslutade jobb.
+
+**Lästa filer:** 12 st
+- server.js, worker.js, worker-pool.js, memory.js, push-service.js, github-sync.js, knowledge-loader.js
+- 28_self_knowledge.md, 26_agent_architecture.md, 06_memory.md, 05_tools.md, 03_server.md
