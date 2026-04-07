@@ -240,4 +240,102 @@ worker-pool.onWorkerDone → push-service.send() → APNS
 
 ---
 
+---
+
+## 📝 KOMBINERAD ANALYS — ALLA PUNKTER FRÅN 3 ARBETSFLÖDEN
+
+### Analys 1: Improve1.md (13 punkter)
+Från jobbet "Analysera, tänk och hur du ska fixa alla dessa fel":
+
+| # | Fil | Rad | Problem | Prio |
+|---|-----|-----|---------|------|
+| 1 | orchestrator.js | 473, 627 | Tomma catch-block — fel loggas men hanteras inte | Kritisk |
+| 2 | worker-pool.js | 27-30 | Ingen max-queue-storlek — minnesläcka möjlig | Kritisk |
+| 3 | server.js | 46, 51 | `reconcileInflightJobs()` anropas dubbelt | Kritisk |
+| 4 | push-service.js | 14-20 | APNS-credentials valideras inte vid init | Kritisk |
+| 5 | worker-pool.js | - | `_pruneOldWorkers()` definieras men anropas aldrig | Hög |
+| 6 | worker-pool.js | 91-92 | `lastProgress` kan vara null om worker redan rensats | Hög |
+| 7 | worker.js | 131 | `checkIn()` anropas inte efter långa verktyg | Hög |
+| 8 | worker.js | 148 | Ingen timeout per verktyg | Hög |
+| 9 | server.js | - | WebSocket saknar autentisering | Hög |
+| 10 | orchestrator.js | 67-71 | `stopMatch[2]` kan vara undefined | Medel |
+| 11 | orchestrator.js | 328 | `_detectWorkerRequest` returnerar null för citatlösa titlar | Medel |
+| 12 | worker-pool.js | - | Ingen message() funktion (dokumentation vs kod) | Medel |
+| 13 | worker.js | 67-79 | history växer obegränsat vid många verktyg | Medel |
+
+### Analys 2: Kritiska säkerhetsproblem (7 punkter)
+Från samma jobb ovan:
+
+| # | Fil | Problem | Prio |
+|---|-----|---------|------|
+| 1 | tools/filesystem.js | Path Traversal — ingen sökvägsvalidering | Kritisk |
+| 2 | tools/exec.js | Bred Shell-whitelist — möjliggodtycklig kodkörning | Kritisk |
+| 3 | tools/pm2.js | Obgränsad PM2-kontroll — kan starta om vilken process | Kritisk |
+| 4 | tools/github.js | GitHub push utan granskning | Kritisk |
+| 5 | server.js | Hårdkodad API_KEY fallback | Kritisk |
+| 6 | worker-pool.js | Worker tas inte bort efter watchdog timeout | Kritisk |
+| 7 | orchestrator.js | Rate limit retry utan iterCount-ökning | Kritisk |
+
+---
+
+## 📊 SAMMANSTÄLLNING: TOTALT 45+ PUNKTER
+
+| Kategori | Antal |
+|----------|-------|
+| Kritiska buggar | 15+ |
+| Höga buggar | 12+ |
+| Medelbuggar | 10+ |
+| Säkerhetsproblem | 7 |
+| Ineffektiviteter | 5 |
+| Saknade funktioner | 4 |
+
+---
+
+## 🚀 KOMPLETT ÅTGÄRDSLISTA
+
+### FAS 1 — KRITISKT (fixa nu)
+
+- [ ] 1. Path Traversal i filesystem.js — lägg till sökvägsvalidering
+- [ ] 2. Begränsa exec-whitelist i exec.js — ta bort python3, sed, curl
+- [ ] 3. Vitlista PM2-processer i pm2.js
+- [ ] 4. Kräv API_KEY i .env — ta bort fallback
+- [ ] 5. Lägg till `this.workers.delete(jobId)` efter watchdog timeout
+- [ ] 6. Fixa rate limit retry-loop i orchestrator.js
+- [ ] 7. Fixa tomma catch-block i orchestrator.js
+- [ ] 8. Lägg till `_pruneOldWorkers()` anrop i worker-pool.js
+- [ ] 9. Ta bort dubbelt anrop till `reconcileInflightJobs()` i server.js
+- [ ] 10. Lägg till APNS-validering vid start i push-service.js
+- [ ] 11. Lägg till checkIn() efter verktyg i worker.js
+- [ ] 12. Lägg till timeout per verktyg i worker.js
+- [ ] 13. Lägg till max-queue-storlek i worker-pool.js
+
+### FAS 2 — HÖG PRIORITET (inom 1 vecka)
+
+- [ ] 14. Lägg till retry-logik för APNS med exponential backoff
+- [ ] 15. Spara push-tokens till fil (persistent lagring)
+- [ ] 16. Lägg till rate limiting på WebSocket
+- [ ] 17. Lägg till felhantering i broadcast() i server.js
+- [ ] 18. Validera sessionId och meddelandestorlek
+- [ ] 19. Implementera WebSocket-autentisering
+- [ ] 20. Smart modellval — välj billig modell för enkla frågor
+- [ ] 21. Rate limiting per session i worker-pool.js
+
+### FAS 3 — MEDEL PRIORITET (inom 1 månad)
+
+- [ ] 22. Implementera Dynamic Island & Live Activity
+- [ ] 23. Förbättra classifyTaskComplexity i orchestrator.js
+- [ ] 24. Sänk HISTORY_TRIM_THRESHOLD till 40
+- [ ] 25. Öka graceful shutdown timeout till 30s
+- [ ] 26. Lägg till audit-loggning
+- [ ] 27. Parallellisera oberoende verktyg
+- [ ] 28. Context caching för knowledge-filer
+
+### FAS 4 — FRAMTIDA
+
+- [ ] 29. Smart modellval (billig för enkla frågor)
+- [ ] 30. Job dependencies
+
+---
+
 *Analys genererad av Navi Workers — 2026-04-02*
+*Uppdaterad: 2026-04-07 med kombinerade punkter från 3 arbetsflöden*
